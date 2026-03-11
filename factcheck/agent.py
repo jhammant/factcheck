@@ -1,23 +1,32 @@
-"""Agentic fact-checking loop — decides what evidence to gather and delivers a verdict."""
+"""Agentic fact-checking loop implementing WKGFC-inspired evidence acquisition.
+
+Based on WKGFC (arXiv 2603.00267) with practical adaptations:
+- Two modes: "fast" (2 LLM calls, good for small models) and "deep" (MDP agent loop)
+- Bidirectional KG retrieval with beam search expansion
+- Wikipedia as a reliable web evidence source
+- Coarse-to-fine web filtering
+- Web→KG triplet alignment
+"""
 
 import json
+import re
 import requests
 from typing import Callable, Optional
 
-from .kg import retrieve_kg_evidence
+from .kg import retrieve_kg_evidence, beam_search_expand, resolve_entity, get_entity_facts_bidirectional
 from .web import retrieve_web_evidence
 
 
 VERDICTS = ["SUPPORTED", "REFUTED", "NOT ENOUGH EVIDENCE"]
 
+# ============ LLM Provider Functions ============
 
 def call_ollama(prompt: str, model: str = "qwen2.5:14b", base_url: str = "http://localhost:11434") -> str:
-    """Call Ollama API for LLM inference."""
     try:
         resp = requests.post(
             f"{base_url}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False},
-            timeout=120,
+            timeout=180,
         )
         return resp.json().get("response", "")
     except Exception as e:
@@ -25,7 +34,6 @@ def call_ollama(prompt: str, model: str = "qwen2.5:14b", base_url: str = "http:/
 
 
 def call_openai(prompt: str, model: str = "gpt-4o-mini", api_key: str = None, base_url: str = None) -> str:
-    """Call OpenAI-compatible API."""
     import os
     key = api_key or os.environ.get("OPENAI_API_KEY", "")
     url = base_url or "https://api.openai.com/v1/chat/completions"
@@ -45,7 +53,6 @@ def call_openai(prompt: str, model: str = "gpt-4o-mini", api_key: str = None, ba
 
 
 def call_gemini(prompt: str, model: str = "gemini-2.0-flash", api_key: str = None) -> str:
-    """Call Google Gemini API."""
     import os
     key = api_key or os.environ.get("GEMINI_API_KEY", "")
     if not key:
@@ -63,22 +70,19 @@ def call_gemini(prompt: str, model: str = "gemini-2.0-flash", api_key: str = Non
 
 
 def make_llm_fn(provider: str = "ollama", model: str = None, **kwargs) -> Callable:
-    """Create an LLM function based on provider."""
     if provider == "ollama":
-        m = model or "qwen2.5:14b"
-        return lambda prompt: call_ollama(prompt, model=m, **kwargs)
+        return lambda prompt: call_ollama(prompt, model=model or "qwen2.5:14b", **kwargs)
     elif provider == "openai":
-        m = model or "gpt-4o-mini"
-        return lambda prompt: call_openai(prompt, model=m, **kwargs)
+        return lambda prompt: call_openai(prompt, model=model or "gpt-4o-mini", **kwargs)
     elif provider == "gemini":
-        m = model or "gemini-2.0-flash"
-        return lambda prompt: call_gemini(prompt, model=m, **kwargs)
+        return lambda prompt: call_gemini(prompt, model=model or "gemini-2.0-flash", **kwargs)
     else:
         raise ValueError(f"Unknown provider: {provider}. Use: ollama, openai, gemini")
 
 
+# ============ Evidence Formatting ============
+
 def format_kg_evidence(kg: dict) -> str:
-    """Format KG evidence into readable text."""
     lines = []
     if kg.get("entities"):
         lines.append("**Resolved Entities:**")
@@ -89,36 +93,65 @@ def format_kg_evidence(kg: dict) -> str:
         lines.append("\n**Knowledge Graph Facts:**")
         seen = set()
         for f in kg["facts"]:
-            key = f"{f.get('entity', '')}: {f['property']} = {f['value']}"
+            direction = f.get("direction", "outgoing")
+            entity = f.get("entity", "?")
+            key = f"{entity}: {f['property']} = {f['value']}"
             if key not in seen:
                 seen.add(key)
-                lines.append(f"  - [{f.get('entity', '?')}] {f['property']}: {f['value']}")
+                prefix = "←" if direction == "incoming" else "→"
+                lines.append(f"  {prefix} [{entity}] {f['property']}: {f['value']}")
 
     if kg.get("expanded"):
-        lines.append("\n**Expanded Relations:**")
-        for f in kg["expanded"][:10]:
-            lines.append(f"  - {f['related_entity']} → {f['property']}: {f['value']}")
+        lines.append("\n**Expanded Relations (beam search):**")
+        for f in kg["expanded"][:15]:
+            hop = f.get("hop", "?")
+            lines.append(f"  (hop {hop}) {f.get('from', '?')} —[{f['property']}]→ {f['related_entity']}")
 
     return "\n".join(lines) if lines else "No KG evidence found."
 
 
 def format_web_evidence(web: dict) -> str:
-    """Format web evidence into readable text."""
     lines = []
-    if web.get("results"):
-        lines.append(f"**Web Search Results ({web.get('source', 'unknown')}):**")
-        for r in web["results"]:
-            lines.append(f"  - [{r['title']}]({r['url']})")
+    results_key = "filtered_results" if web.get("filtered_results") else "results"
+    results = web.get(results_key, [])
+    
+    if results:
+        lines.append(f"**Web Evidence ({web.get('source', 'unknown')}):**")
+        for r in results[:5]:
+            lines.append(f"  - {r.get('title', '?')}")
             if r.get("snippet"):
-                lines.append(f"    {r['snippet'][:200]}")
+                lines.append(f"    {r['snippet'][:300]}")
+
+    if web.get("triplets"):
+        lines.append("\n**Extracted Facts from Web:**")
+        for t in web["triplets"][:10]:
+            lines.append(f"  ({t.get('subject', '?')}, {t.get('relation', '?')}, {t.get('object', '?')})")
 
     if web.get("pages"):
         lines.append("\n**Page Extracts:**")
-        for p in web["pages"]:
+        for p in web["pages"][:2]:
             lines.append(f"  Source: {p['url']}")
-            lines.append(f"  {p['text'][:500]}...")
+            lines.append(f"  {p['text'][:400]}...")
 
     return "\n".join(lines) if lines else "No web evidence found."
+
+
+# ============ Fact Checking Modes ============
+
+def _assess_kg_sufficiency(kg_evidence: dict, claim: str) -> str:
+    """Quick heuristic check — does the KG evidence address the claim?
+    Returns: 'sufficient', 'weak', or 'none'"""
+    n_facts = len(kg_evidence.get("facts", []))
+    n_entities = len(kg_evidence.get("entities", []))
+    n_expanded = len(kg_evidence.get("expanded", []))
+    
+    if n_entities == 0:
+        return "none"
+    if n_facts < 3 and n_expanded < 2:
+        return "weak"
+    if n_facts >= 5:
+        return "sufficient"
+    return "weak"
 
 
 def verify_claim(
@@ -127,91 +160,143 @@ def verify_claim(
     model: str = None,
     brave_api_key: str = None,
     max_steps: int = 4,
+    beam_width: int = 5,
+    max_hops: int = 2,
+    mode: str = "fast",
     verbose: bool = False,
 ) -> dict:
     """
-    Agentic fact-checking loop.
-
-    1. Extract entities and search Knowledge Graph
-    2. Assess if evidence is sufficient
-    3. If not, search the web
-    4. Deliver verdict with citations
+    Fact-check a claim using Knowledge Graphs + Web Search + LLM.
+    
+    Modes:
+    - "fast": 2 LLM calls (entity extraction + verdict). Good for small/slow models.
+              KG retrieval uses heuristic beam search, web search always runs.
+    - "deep": Full MDP agent loop. Agent decides expandKG/webSearch/verdict at each step.
+              Uses LLM for entity disambiguation, beam pruning, web filtering, triplet extraction.
+              Needs a capable model (7B+ recommended).
+    
+    The fast mode still uses bidirectional SPARQL and beam search expansion,
+    just without LLM-guided pruning at each step.
     """
     llm_fn = make_llm_fn(provider, model)
     steps = []
     kg_evidence = None
     web_evidence = None
 
-    # Step 1: Knowledge Graph retrieval
+    # In fast mode, don't pass llm_fn to KG retrieval (avoids extra LLM calls)
+    kg_llm = llm_fn if mode == "deep" else None
+
+    # ──── Step 1: KG Retrieval ────
     if verbose:
-        print("🔍 Step 1: Searching Knowledge Graph...")
-    kg_evidence = retrieve_kg_evidence(claim, llm_fn)
+        print(f"🔍 KG Retrieval (mode={mode}, hops={max_hops}, beam={beam_width})...")
+    
+    kg_evidence = retrieve_kg_evidence(
+        claim, llm_fn=kg_llm, 
+        max_hops=max_hops, beam_width=beam_width
+    )
     kg_text = format_kg_evidence(kg_evidence)
-    steps.append({"action": "kg_retrieval", "result": kg_text})
+    steps.append({"action": "initKGRetrieval", "result": kg_text})
 
     if verbose:
-        print(f"   Found {len(kg_evidence.get('facts', []))} facts, "
-              f"{len(kg_evidence.get('entities', []))} entities")
+        n_facts = len(kg_evidence.get("facts", []))
+        n_ents = len(kg_evidence.get("entities", []))
+        n_exp = len(kg_evidence.get("expanded", []))
+        print(f"   {n_ents} entities, {n_facts} facts, {n_exp} expanded relations")
 
-    # Step 2: Ask LLM if KG evidence is sufficient
-    sufficiency_prompt = f"""You are a fact-checker. Given this claim and evidence from a knowledge graph, 
-is the evidence SUFFICIENT to make a verdict? 
-
-Claim: "{claim}"
-
-Evidence:
-{kg_text}
-
-Reply with ONLY one of:
-- "SUFFICIENT" if you can confidently verify or refute the claim
-- "INSUFFICIENT" if you need more evidence (explain what's missing in one sentence)
-"""
-    sufficiency = llm_fn(sufficiency_prompt).strip()
-    steps.append({"action": "assess_sufficiency", "result": sufficiency})
-
-    # Step 3: Web search if needed
-    if "INSUFFICIENT" in sufficiency.upper() or len(kg_evidence.get("facts", [])) < 3:
+    # ──── Step 2: Decide if we need web evidence ────
+    kg_quality = _assess_kg_sufficiency(kg_evidence, claim)
+    
+    if mode == "fast":
+        # Fast mode: always fetch web evidence for completeness
+        # Wikipedia is free and fast — no reason not to
         if verbose:
-            print("🌐 Step 2: KG insufficient, searching web...")
-        web_evidence = retrieve_web_evidence(claim, api_key=brave_api_key)
+            print(f"🌐 Web Search (KG quality: {kg_quality})...")
+        web_evidence = retrieve_web_evidence(claim, api_key=brave_api_key, llm_fn=None)
         web_text = format_web_evidence(web_evidence)
-        steps.append({"action": "web_retrieval", "result": web_text})
-
+        steps.append({"action": "webSearch", "result": web_text})
+        
         if verbose:
-            print(f"   Found {len(web_evidence.get('results', []))} web results, "
-                  f"{len(web_evidence.get('pages', []))} page extracts")
+            src = web_evidence.get("source", "?")
+            n_results = len(web_evidence.get("results", []))
+            print(f"   {n_results} results from {src}")
+    
+    elif mode == "deep":
+        web_text = ""
+        # Deep mode: MDP agent loop
+        for step_num in range(2, max_steps + 1):
+            # Agent decides action
+            action_prompt = f"""You are a fact-checking agent. Given this claim and evidence, what should you do next?
+
+CLAIM: "{claim}"
+KG EVIDENCE QUALITY: {kg_quality}
+{kg_text[:1500]}
+{web_text[:500] if web_text else "(No web evidence yet)"}
+
+Choose ONE action:
+- expandKG — need more knowledge graph relations
+- webSearch — need web sources to complement KG
+- verdict — have enough evidence to decide
+
+Reply with ONLY the action name."""
+            
+            action = llm_fn(action_prompt).strip().lower()
+            
+            if "expandkg" in action and kg_evidence.get("entities"):
+                if verbose:
+                    print(f"🔄 Step {step_num}: expandKG")
+                for entity in kg_evidence["entities"][1:3]:
+                    extra = beam_search_expand(
+                        entity["id"], entity["label"], claim,
+                        llm_fn=llm_fn, beam_width=3, max_hops=1,
+                    )
+                    kg_evidence["expanded"].extend(extra)
+                kg_text = format_kg_evidence(kg_evidence)
+                kg_quality = _assess_kg_sufficiency(kg_evidence, claim)
+                steps.append({"action": "expandKG", "result": f"Expanded: {len(kg_evidence['facts'])} facts"})
+                
+            elif "websearch" in action:
+                if verbose:
+                    print(f"🌐 Step {step_num}: webSearch")
+                web_evidence = retrieve_web_evidence(claim, api_key=brave_api_key, llm_fn=llm_fn)
+                web_text = format_web_evidence(web_evidence)
+                steps.append({"action": "webSearch", "result": web_text})
+            else:
+                if verbose:
+                    print(f"⚖️  Step {step_num}: verdict")
+                break
     else:
         web_text = ""
-        if verbose:
-            print("✅ Step 2: KG evidence sufficient, skipping web search")
 
-    # Step 4: Final verdict
+    # ──── Final Step: Verdict ────
     if verbose:
-        print("⚖️  Step 3: Delivering verdict...")
+        print("⚖️  Delivering verdict...")
 
     all_evidence = kg_text
     if web_text:
         all_evidence += "\n\n" + web_text
 
-    verdict_prompt = f"""You are an expert fact-checker. Analyse the claim against ALL available evidence and deliver a verdict.
+    verdict_prompt = f"""You are a fact-checker. Analyse the claim against the evidence and deliver a verdict.
 
 CLAIM: "{claim}"
 
 EVIDENCE:
 {all_evidence}
 
-Instructions:
-1. Analyse each piece of evidence for relevance to the claim
-2. Identify any contradictions between evidence sources
-3. Deliver your verdict as one of: SUPPORTED, REFUTED, or NOT ENOUGH EVIDENCE
-4. Provide a clear explanation citing specific evidence
-5. Rate your confidence: HIGH, MEDIUM, or LOW
+RULES:
+- Compare the SPECIFIC claim against the evidence
+- If evidence shows a DIFFERENT answer than what the claim states → REFUTED
+  Example: Claim says "capital is Sydney" but evidence shows capital is Canberra → REFUTED
+  Example: Claim says "founded by X" but evidence shows founded by Y, X joined later → REFUTED
+  Example: Claim says "happened in 1991" but evidence shows 1989 → REFUTED
+- If evidence confirms the claim → SUPPORTED
+- Only say NOT ENOUGH EVIDENCE if genuinely unable to determine
+- Pay attention to incoming relations (←) which show what points TO an entity
 
-Format your response EXACTLY as:
+Format EXACTLY as:
 VERDICT: [SUPPORTED/REFUTED/NOT ENOUGH EVIDENCE]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
-EXPLANATION: [Your reasoning with citations]
-KEY EVIDENCE: [The most important facts that support your verdict]
+EXPLANATION: [Your reasoning citing specific evidence]
+KEY EVIDENCE: [2-3 most important facts]
 """
     verdict_raw = llm_fn(verdict_prompt)
     steps.append({"action": "verdict", "result": verdict_raw})
@@ -219,7 +304,6 @@ KEY EVIDENCE: [The most important facts that support your verdict]
     # Parse verdict
     verdict = "NOT ENOUGH EVIDENCE"
     confidence = "LOW"
-    explanation = verdict_raw
 
     for v in VERDICTS:
         if v in verdict_raw.upper():
@@ -241,10 +325,12 @@ KEY EVIDENCE: [The most important facts that support your verdict]
             "kg": {
                 "entities": len(kg_evidence.get("entities", [])) if kg_evidence else 0,
                 "facts": len(kg_evidence.get("facts", [])) if kg_evidence else 0,
+                "expanded": len(kg_evidence.get("expanded", [])) if kg_evidence else 0,
             },
             "web": {
                 "results": len(web_evidence.get("results", [])) if web_evidence else 0,
                 "pages": len(web_evidence.get("pages", [])) if web_evidence else 0,
+                "triplets": len(web_evidence.get("triplets", [])) if web_evidence else 0,
             },
         },
     }

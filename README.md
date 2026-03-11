@@ -1,128 +1,171 @@
-# FactCheck 🔍
+# 🔍 FactCheck
 
-**Open-source hybrid fact verification using Knowledge Graphs + Web Search**
+Open-source hybrid fact verification using **Knowledge Graphs** + **Web Search** + **LLM reasoning**.
 
-Inspired by [WKGFC](https://arxiv.org/abs/2603.00267) — a multi-agent evidence retrieval system for fact-checking. FactCheck implements the core hybrid retrieval pattern: structured knowledge graph facts (Wikidata) anchored with web search evidence, orchestrated by an LLM agent that decides what to look up.
+Inspired by [WKGFC](https://arxiv.org/abs/2603.00267) (Multi-Sourced, Multi-Agent Evidence Retrieval for Fact-Checking, SIGIR 2026).
 
 ## How It Works
 
 ```
-Claim → Extract Entities → Wikidata SPARQL → Assess Sufficiency
-                                                     │
-                                          ┌──────────┴──────────┐
-                                          │                     │
-                                     Sufficient            Insufficient
-                                          │                     │
-                                          ▼                     ▼
-                                       Verdict          Web Search → Verdict
+Claim → Entity Extraction → Wikidata KG (bidirectional SPARQL)
+                                ↓
+                         Beam Search Expansion (multi-hop)
+                                ↓
+                    Evidence Sufficient? ─── Yes → LLM Verdict
+                                │
+                               No
+                                ↓
+                    Web Search (Brave/Wikipedia/DDG)
+                                ↓
+                         LLM Verdict + Citations
 ```
 
-1. **Entity Extraction** — LLM or regex-based NER pulls key entities from the claim
-2. **Knowledge Graph Retrieval** — Entities are resolved against Wikidata, facts retrieved via SPARQL, and the graph expanded by following relevant relations
-3. **Sufficiency Assessment** — LLM decides if KG evidence is enough or if web search is needed
-4. **Web Search** — Brave Search API (or DuckDuckGo fallback) retrieves supporting/contradicting evidence
-5. **Verdict** — LLM synthesises all evidence into SUPPORTED / REFUTED / NOT ENOUGH EVIDENCE with citations and confidence rating
+**Two modes:**
+
+| Mode | LLM Calls | Speed | Best For |
+|------|-----------|-------|----------|
+| `fast` | 2 | ~30s (local 3B) | Small/slow models, quick checks |
+| `deep` | 4-8 | ~2min+ | Capable models (7B+, GPT-4, Gemini) |
+
+## Key Features
+
+- **Wikidata SPARQL** — Structured facts from 100M+ items (free, no API key)
+- **Bidirectional retrieval** — Both outgoing AND incoming relations (catches "X is capital of Y" from either direction)
+- **Beam search expansion** — Multi-hop graph traversal with relevance pruning
+- **Wikipedia + Brave + DDG** — Multiple web sources with automatic fallback
+- **Coarse-to-fine web filtering** — LLM scores web passages for factual relevance (deep mode)
+- **Web→KG triplet extraction** — Converts web text into structured facts (deep mode)
+- **Multi-provider LLM** — Ollama (local), OpenAI, Google Gemini
+- **CLI with batch mode** — Verify hundreds of claims from a file
+
+## Install
+
+```bash
+pip install -e .
+```
+
+Or with dependencies:
+```bash
+pip install click rich requests SPARQLWrapper
+```
 
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Local model (Ollama)
+factcheck verify "The Eiffel Tower is in Berlin" --model llama3.2:3b
 
-# Verify a claim (uses local Ollama by default)
-factcheck verify "The Eiffel Tower is located in Berlin"
+# OpenAI
+factcheck verify "Marie Curie won two Nobel Prizes" -p openai -m gpt-4o-mini
 
-# Use a specific model
-factcheck verify "Einstein was born in Germany" --model qwen2.5:14b
+# Gemini
+factcheck verify "Bitcoin was invented by Satoshi Nakamoto" -p gemini
 
-# Use OpenAI instead of Ollama
-factcheck verify "The speed of light is 300,000 km/s" --provider openai
+# Deep mode (more thorough, needs bigger model)
+factcheck verify "Tesla was founded by Elon Musk" --mode deep -m qwen2.5:14b
 
-# JSON output
-factcheck verify "Marie Curie won two Nobel Prizes" --json-output
-
-# Batch verification
+# Batch mode
 factcheck batch claims.txt --output results.json
 
-# Verbose mode (shows step-by-step)
-factcheck verify "Shakespeare wrote Hamlet" -v
+# Verbose (see the evidence gathering process)
+factcheck verify "The Great Wall of China is visible from space" -v
 ```
+
+## Architecture (vs WKGFC paper)
+
+| WKGFC Paper | FactCheck Implementation |
+|-------------|------------------------|
+| Wikidata SPARQL with expand-and-prune beam search | ✅ Bidirectional SPARQL + beam search expansion |
+| LLM-guided relation pruning at each hop | ✅ In deep mode; heuristic in fast mode |
+| Web retrieval with coarse-to-fine LLM filtering | ✅ In deep mode; raw results in fast mode |
+| Web→KG triplet alignment | ✅ In deep mode |
+| MDP agent loop (expandKG/webSearch/verdict) | ✅ In deep mode; fixed pipeline in fast mode |
+| Self-reflection + prompt optimization | ❌ Not implemented (needs training data) |
+| SpaCy NER for entity extraction | LLM-based extraction (more flexible) |
 
 ## Example Output
 
 ```
-🔎 Checking: The Eiffel Tower is located in Berlin
+🔎 Checking: The capital of Australia is Sydney
 
-🔍 Step 1: Searching Knowledge Graph...
-   Found 15 facts, 2 entities
-🌐 Step 2: KG insufficient, searching web...
-   Found 5 web results, 2 page extracts
-⚖️  Step 3: Delivering verdict...
+╭──────────────── ⚖️  Verdict ─────────────────╮
+│ REFUTED  🟢 Confidence: HIGH                  │
+╰───────────────────────────────────────────────╯
 
-╭─────────── ⚖️  Verdict ────────────╮
-│ REFUTED  🟢 Confidence: HIGH       │
-╰─────────────────────────────────────╯
-
-┌──────── Evidence Gathered ────────┐
-│ Source        │ Items             │
-├───────────────┼───────────────────┤
-│ KG Entities   │ 2                 │
-│ KG Facts      │ 15                │
-│ Web Results   │ 5                 │
-│ Page Extracts │ 2                 │
-└───────────────┴───────────────────┘
+Evidence:
+  → [Australia] capital: Canberra
+  ← [Canberra] capital of: Australia
+  → [Sydney] instance of: city, million city
+  
+Explanation: The claim states Sydney is the capital, but Wikidata 
+clearly shows Canberra is the capital of Australia. Sydney is the 
+largest city but not the capital.
 ```
+
+## Accuracy
+
+Tested on 21 claims with llama3.2:3b (tiny model on ARM):
+
+| Category | Result |
+|----------|--------|
+| Clear facts (Marie Curie, Einstein) | ✅ HIGH confidence |
+| Geographic (Everest in Africa) | ✅ REFUTED correctly |
+| Temporal (Berlin Wall 1991) | ✅ REFUTED correctly |
+| Nuanced (Tesla founding, Cleopatra) | ⚠️ Sometimes wrong with 3B model |
+
+**Accuracy scales with model size.** GPT-4o-mini or Gemini Flash give significantly better results, especially on nuanced claims.
 
 ## Providers
 
 | Provider | Setup | Cost |
 |----------|-------|------|
-| **Ollama** (default) | `ollama pull qwen2.5:14b` | Free (local) |
-| **OpenAI** | Set `OPENAI_API_KEY` | ~$0.01/claim |
-| **Any OpenAI-compatible** | Custom base URL | Varies |
+| Ollama (local) | `ollama pull llama3.2:3b` | Free |
+| OpenAI | `export OPENAI_API_KEY=sk-...` | ~$0.001/claim |
+| Gemini | `export GEMINI_API_KEY=AI...` | Free tier available |
 
-## Web Search
+## API Usage
 
-By default, uses DuckDuckGo instant answers (no API key needed). For better results, set a Brave Search API key:
+```python
+from factcheck.agent import verify_claim
 
-```bash
-export BRAVE_API_KEY=your_key_here
+result = verify_claim(
+    claim="The Earth is flat",
+    provider="ollama",
+    model="llama3.2:3b",
+    mode="fast",        # or "deep" for thorough checking
+    max_hops=2,         # KG expansion depth
+    beam_width=5,       # beam search width
+)
+
+print(result["verdict"])      # "REFUTED"
+print(result["confidence"])   # "HIGH"
+print(result["explanation"])  # Detailed reasoning
+print(result["evidence"])     # KG + web evidence counts
 ```
-
-## Architecture
-
-The design is deliberately simple — 4 Python files, no ML training, no complex dependencies:
-
-- **`kg.py`** — Wikidata SPARQL retrieval with entity resolution and graph expansion
-- **`web.py`** — Web search via Brave/DuckDuckGo with page extraction
-- **`agent.py`** — Agentic loop: KG → assess → web (if needed) → verdict
-- **`cli.py`** — Rich CLI with tables, panels, and batch mode
-
-### Key Differences from WKGFC
-
-| WKGFC (Paper) | FactCheck (This) |
-|---------------|-----------------|
-| Full MDP formulation | Simple 3-step loop |
-| TextGrad prompt optimization | Zero-shot prompting |
-| SpaCy NER | LLM-based or regex NER |
-| Custom KG construction | Wikidata (free, no setup) |
-| GPT-4o only | Any LLM (Ollama, OpenAI, etc.) |
-| Research prototype | Installable CLI tool |
-
-## Use Cases
-
-- **Content verification** — Fact-check AI-generated articles before publishing
-- **Research** — Quick claim verification with structured evidence
-- **Education** — Teach critical thinking with transparent reasoning chains
-- **Journalism** — First-pass verification with citation trails
 
 ## License
 
 MIT
 
-## Credits
+## Citation
+
+If you use this in research:
+
+```bibtex
+@software{factcheck2026,
+  author = {Hammant, Jonathan},
+  title = {FactCheck: Hybrid Fact Verification with Knowledge Graphs},
+  year = {2026},
+  url = {https://github.com/jhammant/factcheck}
+}
+```
 
 Inspired by:
-- [WKGFC](https://arxiv.org/abs/2603.00267) — Gong et al., "Multi-Sourced, Multi-Agent Evidence Retrieval for Fact-Checking"
-- [Wikidata](https://www.wikidata.org/) — Free structured knowledge base
-- [Brave Search](https://brave.com/search/api/) — Privacy-respecting search API
+```bibtex
+@inproceedings{wkgfc2026,
+  title={Multi-Sourced, Multi-Agent Evidence Retrieval for Fact-Checking},
+  author={Gong, Shuzhi and others},
+  booktitle={SIGIR},
+  year={2026}
+}
+```

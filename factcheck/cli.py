@@ -41,7 +41,11 @@ def cli():
 @click.option("--brave-key", envvar="BRAVE_API_KEY", default=None, help="Brave Search API key")
 @click.option("--verbose", "-v", is_flag=True, help="Show step-by-step progress")
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON")
-def verify(claim, provider, model, brave_key, verbose, json_output):
+@click.option("--mode", default="fast", type=click.Choice(["fast", "deep"]),
+              help="fast=2 LLM calls (good for small models), deep=full MDP agent loop")
+@click.option("--hops", default=2, help="Max KG expansion hops (1-3)")
+@click.option("--beam-width", default=5, help="Beam search width for KG expansion")
+def verify(claim, provider, model, brave_key, verbose, json_output, mode, hops, beam_width):
     """Verify a claim against Knowledge Graph and web evidence."""
     if not json_output:
         console.print(f"\n🔎 Checking: [italic]{claim}[/italic]\n")
@@ -52,6 +56,9 @@ def verify(claim, provider, model, brave_key, verbose, json_output):
         model=model,
         brave_api_key=brave_key,
         verbose=verbose,
+        mode=mode,
+        max_hops=hops,
+        beam_width=beam_width,
     )
 
     if json_output:
@@ -74,7 +81,9 @@ def verify(claim, provider, model, brave_key, verbose, json_output):
     table.add_column("Items", style="green")
     table.add_row("KG Entities", str(result["evidence"]["kg"]["entities"]))
     table.add_row("KG Facts", str(result["evidence"]["kg"]["facts"]))
+    table.add_row("KG Expanded", str(result["evidence"]["kg"].get("expanded", 0)))
     table.add_row("Web Results", str(result["evidence"]["web"]["results"]))
+    table.add_row("Web Triplets", str(result["evidence"]["web"].get("triplets", 0)))
     table.add_row("Page Extracts", str(result["evidence"]["web"]["pages"]))
     console.print(table)
 
@@ -89,7 +98,9 @@ def verify(claim, provider, model, brave_key, verbose, json_output):
 @click.option("--model", "-m", default=None, help="Model name")
 @click.option("--brave-key", envvar="BRAVE_API_KEY", default=None)
 @click.option("--output", "-o", default=None, help="Output JSON file")
-def batch(input_file, provider, model, brave_key, output):
+@click.option("--mode", default="fast", type=click.Choice(["fast", "deep"]),
+              help="fast=2 LLM calls, deep=full MDP agent loop")
+def batch(input_file, provider, model, brave_key, output, mode):
     """Verify multiple claims from a file (one claim per line or JSON array)."""
     # Load claims
     with open(input_file) as f:
@@ -110,7 +121,7 @@ def batch(input_file, provider, model, brave_key, output):
         console.print(f"\n[bold]Claim {i}/{len(claims)}:[/bold] {claim}")
         result = verify_claim(
             claim=claim, provider=provider, model=model,
-            brave_api_key=brave_key, verbose=False,
+            brave_api_key=brave_key, verbose=False, mode=mode,
         )
         results.append(result)
         color = VERDICT_COLORS.get(result["verdict"], "white")
