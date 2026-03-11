@@ -4,5 +4,13 @@ __pycache__/
 dist/
 build/
 *.pyc
+*.cast
 test_results.json
+benchmark_results.json
+benchmark_output.txt
+demo_output.txt
+quick_results.json
+quick_test.txt
+test_claims*.txt
+test_current*
 .env

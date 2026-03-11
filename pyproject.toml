@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factcheck-kg"
+version = "0.1.0"
+description = "Open-source hybrid fact verification using Knowledge Graphs + Web Search + LLMs"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Jonathan Hammant", email = "jhammant@gmail.com"}
+]
+keywords = [
+    "fact-checking", "knowledge-graph", "wikidata", "llm",
+    "nlp", "verification", "sparql", "fact-verification"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "SPARQLWrapper>=2.0.0",
+    "rich>=13.0.0",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.115.0", "uvicorn>=0.34.0"]
+all = ["fastapi>=0.115.0", "uvicorn>=0.34.0"]
+
+[project.urls]
+Homepage = "https://github.com/jhammant/factcheck"
+Repository = "https://github.com/jhammant/factcheck"
+Issues = "https://github.com/jhammant/factcheck/issues"
+
+[project.scripts]
+factcheck = "factcheck.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["factcheck*"]
