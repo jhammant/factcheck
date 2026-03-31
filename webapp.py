@@ -205,7 +205,8 @@ async function verify() {
   error.classList.remove('visible');
 
   try {
-    const resp = await fetch('/api/verify', {
+    const base = window.location.pathname.replace(/\/$/, '');
+    const resp = await fetch(base + '/api/verify', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
