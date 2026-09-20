@@ -138,7 +138,7 @@ FRONTEND_HTML = """<!DOCTYPE html>
         <option value="llama3.2:3b">llama3.2:3b</option>
         <option value="qwen2.5:14b">qwen2.5:14b</option>
         <option value="gpt-4o-mini">gpt-4o-mini</option>
-        <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
       </select>
       <select id="mode">
         <option value="fast">Fast</option>

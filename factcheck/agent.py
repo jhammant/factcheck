@@ -52,7 +52,7 @@ def call_openai(prompt: str, model: str = "gpt-4o-mini", api_key: str = None, ba
         return f"[LLM Error: {e}]"
 
 
-def call_gemini(prompt: str, model: str = "gemini-2.0-flash", api_key: str = None) -> str:
+def call_gemini(prompt: str, model: str = "gemini-2.5-flash", api_key: str = None) -> str:
     import os
     key = api_key or os.environ.get("GEMINI_API_KEY", "")
     if not key:
@@ -64,7 +64,15 @@ def call_gemini(prompt: str, model: str = "gemini-2.0-flash", api_key: str = Non
             "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1000},
         }, timeout=60)
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        if "error" in data:
+            return f"[Gemini API Error: {data['error'].get('message', data['error'])}]"
+        if "candidates" not in data:
+            block_reason = data.get("promptFeedback", {}).get("blockReason", "unknown")
+            return f"[Gemini blocked response: {block_reason}]"
+        candidate = data["candidates"][0]
+        if candidate.get("finishReason") not in (None, "STOP"):
+            return f"[Gemini blocked response: {candidate.get('finishReason')}]"
+        return candidate["content"]["parts"][0]["text"]
     except Exception as e:
         return f"[LLM Error: {e}]"
 
@@ -75,7 +83,7 @@ def make_llm_fn(provider: str = "ollama", model: str = None, **kwargs) -> Callab
     elif provider == "openai":
         return lambda prompt: call_openai(prompt, model=model or "gpt-4o-mini", **kwargs)
     elif provider == "gemini":
-        return lambda prompt: call_gemini(prompt, model=model or "gemini-2.0-flash", **kwargs)
+        return lambda prompt: call_gemini(prompt, model=model or "gemini-2.5-flash", **kwargs)
     else:
         raise ValueError(f"Unknown provider: {provider}. Use: ollama, openai, gemini")
 
